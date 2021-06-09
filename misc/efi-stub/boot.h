@@ -185,11 +185,18 @@ struct hv_loader {
 	UINTN (*get_total_modsize)(IN HV_LOADER hvld);
 	/* Get the total lengths of the module commands */
 	UINTN (*get_total_modcmdsize)(IN HV_LOADER hvld);
+	/* Get the total memory size of hv image */
+	UINTN (*get_hv_ram_size)(IN HV_LOADER hvld);
 
 	/* Get the start address of the memory region stored ACRN hypervisor image */
 	EFI_PHYSICAL_ADDRESS (*get_hv_hpa)(IN HV_LOADER hvld);
 	/* Get the start address of the memory region stored module files */
 	EFI_PHYSICAL_ADDRESS (*get_mod_hpa)(IN HV_LOADER hvld);
+	/* Get the entry point of ACRN hypervisor */
+	EFI_PHYSICAL_ADDRESS (*get_hv_entry)(IN HV_LOADER hvld);
+
+	/* Get the supported multiboot version of ACRN hypervisor image */
+	int (*get_multiboot_version)(IN HV_LOADER hvld);
 
 	/* Set hypervisor boot command line to multiboot2 tag */
 	void (*fill_bootcmd_tag)(IN HV_LOADER hvld, OUT struct multiboot2_tag_string *tag);

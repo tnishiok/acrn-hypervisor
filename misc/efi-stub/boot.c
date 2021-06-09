@@ -212,20 +212,19 @@ out:
 	return err;
 }
 
-static inline void hv_jump(EFI_PHYSICAL_ADDRESS hv_start,
-		struct multiboot_info *mbi)
+static inline void hv_jump(EFI_PHYSICAL_ADDRESS hv_entry, uint32_t mbi, int32_t magic)
 {
-	hv_func hf;
-
-	/* The 64-bit entry of acrn hypervisor is 0x1200 from the start
-	 * address of hv image.
-	 */
-	hf = (hv_func)(hv_start + 0x1200);
-
-	asm volatile ("cli");
-
-	/* jump to acrn hypervisor */
-	hf(MB_INFO_MAGIC, mbi);
+    /* TODO: Delete this comment when creating PR
+     * The entry point specified in the multiboot header is the 32-bit one (cpu_primary_start_32),
+     * which is different from the previously hard-coded 64-bit entry point. And the registers
+     * for placing magic and mbi are different too.
+     */
+	asm volatile (
+		"cli\n\t"
+		"jmp *%2\n\t"
+		:
+		: "a"(magic), "b"(mbi), "r"(hv_entry)
+		);
 }
 
 static EFI_STATUS
@@ -307,7 +306,7 @@ fill_e820(HV_LOADER hvld, struct efi_memmap_info *mmap_info,
 	 * available RAM in e820 table
 	 */
 	mmap[j].mm_base_addr = hvld->get_hv_hpa(hvld);
-	mmap[j].mm_length = CONFIG_HV_RAM_SIZE;
+	mmap[j].mm_length = hvld->get_hv_ram_size(hvld);
 	mmap[j].mm_type = E820_RAM;
 	j++;
 
@@ -374,7 +373,6 @@ out:
 	return err;
 }
 
-#ifdef CONFIG_MULTIBOOT2
 static struct acpi_table_rsdp *
 search_rsdp()
 {
@@ -588,28 +586,27 @@ out:
 	free_pool(mbistart);
 	return err;
 }
-#endif
 
 static EFI_STATUS
 run_acrn(EFI_HANDLE image, HV_LOADER hvld)
 {
 	EFI_STATUS err;
 	struct efi_memmap_info memmapinfo;
-	struct multiboot_info *mbi;
+	void *mbi;
+	int32_t mb_version = hvld->get_multiboot_version(hvld);
 
 	err = set_mor_bit();
 	/* If MOR not supported, emit a warning and proceed */
 	if (err != EFI_SUCCESS && err != EFI_NOT_FOUND)
 		goto out;
 
-#ifdef CONFIG_MULTIBOOT2
-	/* MB2 has no fixed mbinfo layout. The mbi as output will
-	 * NOT conform to the layout of struct multiboot_info.
-	 */
-	err = construct_mbi2(hvld, (void **)&mbi, &memmapinfo);
-#else
-	err = construct_mbi(hvld, &mbi, &memmapinfo);
-#endif
+	if (mb_version == 2) {
+		err = construct_mbi2(hvld, &mbi, &memmapinfo);
+	}
+	else {
+		err = construct_mbi(hvld, (struct multiboot_info **)&mbi, &memmapinfo);
+	}
+
 	if (err != EFI_SUCCESS)
 		goto out;
 
@@ -617,7 +614,8 @@ run_acrn(EFI_HANDLE image, HV_LOADER hvld)
 	if (err != EFI_SUCCESS)
 		goto out;
 
-	hv_jump(hvld->get_hv_hpa(hvld), mbi);
+	hv_jump(hvld->get_hv_entry(hvld), (uint32_t)(uint64_t)mbi,
+		mb_version == 2 ? MULTIBOOT2_INFO_MAGIC : MULTIBOOT_INFO_MAGIC);
 
 	/* Not reached on success */
 out:

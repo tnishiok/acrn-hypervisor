@@ -52,6 +52,9 @@ extern struct multiboot_info mbi;
 #define MULTIBOOT_HEADER_HAS_VBE	0x00000004
 #define MULTIBOOT_HEADER_HAS_ADDR	0x00010000
 
+#define MULTIBOOT_HEADER_ALIGN		4
+#define MULTIBOOT_SEARCH		8192
+
 #if !defined(_LOCORE)
 struct multiboot_header {
 	uint32_t	mh_magic;
@@ -177,14 +180,6 @@ struct multiboot_module {
 
 #endif /* !defined(_LOCORE) */
 
-#ifdef CONFIG_MULTIBOOT2
-#define MB_INFO_MAGIC	MULTIBOOT2_INFO_MAGIC
-#else
-#define MB_INFO_MAGIC	MULTIBOOT_INFO_MAGIC
-#endif
-
-#ifdef CONFIG_MULTIBOOT2
-
 struct multiboot2_header
 {
   uint32_t magic;
@@ -245,7 +240,6 @@ struct multiboot2_header
 #define MULTIBOOT2_HEADER_TAG_OPTIONAL			1
 
 #define MULTIBOOT2_ARCHITECTURE_I386			0
-#define MULTIBOOT2_ARCHITECTURE_MIPS32			4
 
 #ifndef ASSEMBLER
 
@@ -380,7 +374,5 @@ struct multiboot2_tag_efi_mmap {
 	uint8_t		efi_mmap[0];
 };
 #endif
-
-#endif /* CONFIG_MULTIBOOT2 */
 
 #endif /* _MULTIBOOT_H */

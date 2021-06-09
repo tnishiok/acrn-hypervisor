@@ -48,6 +48,9 @@
 #define LZH_BOOT_IMG	1u
 #define LZH_MOD0_CMD	2u
 
+typedef struct multiboot2_header_tag_relocatable RELOC_INFO;
+typedef struct multiboot2_header_tag_address LADDR_INFO;
+
 typedef struct {
   UINT32           Signature;
   UINT8            Version;
@@ -84,12 +87,17 @@ typedef struct {
 struct container {
 	struct hv_loader ops;   /* loader operation table */
 
+	UINT8 mb_version;       /* multiboot version of hv image. Can be either 1 or 2. */
+
 	CHAR16 *options;        /* uefi boot option passed by efibootmgr -u */
 	UINT32 options_size;    /* length of UEFI boot option */
 	UINTN boot_cmdsize;     /* length of boot command to pass hypervisor */
 
 	EFI_PHYSICAL_ADDRESS hv_hpa;    /* start of memory stored hv image */
 	EFI_PHYSICAL_ADDRESS mod_hpa;	/* start of memory stored module files */
+	EFI_PHYSICAL_ADDRESS hv_entry;	/* entry point offset of hv */
+	RELOC_INFO *reloc;              /* relocation info */
+	LADDR_INFO *laddr;              /* load address info */
 
 	UINTN mod_count;        /* num of modules */
 	UINTN total_modsize;    /* memory size allocated to load modules */
@@ -107,7 +115,8 @@ struct container {
  *
  * @return EFI_SUCCESS(0) on success, non-zero on error
  */
-static EFI_STATUS load_acrn_elf(const UINT8 *elf_image, EFI_PHYSICAL_ADDRESS *hv_hpa)
+static EFI_STATUS load_acrn_elf(const UINT8 *elf_image, EFI_PHYSICAL_ADDRESS *hv_hpa,
+	UINT32 hv_ram_start, UINT32 hv_ram_size, const RELOC_INFO *reloc)
 {
 	EFI_STATUS err = EFI_SUCCESS;
 	int i;
@@ -128,12 +137,13 @@ static EFI_STATUS load_acrn_elf(const UINT8 *elf_image, EFI_PHYSICAL_ADDRESS *hv
 	 * Don't relocate hypervisor binary under 256MB, which could be where
 	 * guest Linux kernel boots from, and other usage, e.g. hvlog buffer
 	*/
-#ifdef CONFIG_RELOC
-	err = emalloc_reserved_aligned(hv_hpa, CONFIG_HV_RAM_SIZE, 2U * MEM_ADDR_1MB,
-			256U * MEM_ADDR_1MB, MEM_ADDR_4GB);
-#else
-	err = emalloc_fixed_addr(hv_hpa, CONFIG_HV_RAM_SIZE, CONFIG_HV_RAM_START);
-#endif
+	if (reloc) {
+		err = emalloc_reserved_aligned(hv_hpa, hv_ram_size, reloc->align,
+			reloc->min_addr, reloc->max_addr);
+	}
+	else {
+		err = emalloc_fixed_addr(hv_hpa, hv_ram_size, hv_ram_start);
+	}
 
 	if (err != EFI_SUCCESS) {
 		Print(L"Failed to allocate memory for ACRN HV %r\n", err);
@@ -151,17 +161,97 @@ static EFI_STATUS load_acrn_elf(const UINT8 *elf_image, EFI_PHYSICAL_ADDRESS *hv
 			goto out;
 		}
 
-		addr = (EFI_PHYSICAL_ADDRESS)(*hv_hpa + (phdr->p_paddr - CONFIG_HV_RAM_START));
+		addr = (EFI_PHYSICAL_ADDRESS)(*hv_hpa + (phdr->p_paddr - hv_ram_start));
 		memcpy((char *)addr, (const char *)(elf_image + phdr->p_offset), phdr->p_filesz);
 
 		if (phdr->p_memsz > phdr->p_filesz) {
-			addr = (EFI_PHYSICAL_ADDRESS)(*hv_hpa + (phdr->p_paddr - CONFIG_HV_RAM_START + phdr->p_filesz));
+			addr = (EFI_PHYSICAL_ADDRESS)(*hv_hpa + (phdr->p_paddr - hv_ram_start + phdr->p_filesz));
 			(void)memset((void *)addr, 0x0, (phdr->p_memsz - phdr->p_filesz));
 		}
 	}
 
 out:
 	return err;
+}
+
+static const struct multiboot_header *find_mb1header(const UINT8 *buffer, uint64_t len)
+{
+	const struct multiboot_header *header;
+
+	for (header = (struct multiboot_header *)buffer;
+		((char *)header <= (char *)buffer + len - 12);
+		header = (struct multiboot_header *)((char *)header + MULTIBOOT_HEADER_ALIGN))
+	{
+		if (header->mh_magic == MULTIBOOT_HEADER_MAGIC &&
+			!(header->mh_magic + header->mh_flags + header->mh_checksum))
+			return header;
+	}
+
+	return NULL;
+}
+
+static int parse_mb1header(const struct multiboot_header *header, struct container *ctr)
+{
+	/* TODO: Currently we have nothing other than magic, flags and checksum in mb1 header, and
+	 * flags contains only 1 flag: request memory map, and by default we pass these
+	 * information to ACRN. So for now there is nothing we need to do here.
+	 */
+	return 0;
+}
+
+static const struct multiboot2_header *find_mb2header(const UINT8 *buffer, uint64_t len)
+{
+	const struct multiboot2_header *header;
+
+	for (header = (const struct multiboot2_header *)buffer;
+		((char *)header <= (char *)buffer + len - 12);
+		header = (struct multiboot2_header *)((uint64_t)header + MULTIBOOT2_HEADER_ALIGN / 4))
+	{
+		if (header->magic == MULTIBOOT2_HEADER_MAGIC &&
+			!(header->magic + header->architecture + header->header_length + header->checksum) &&
+			header->architecture == MULTIBOOT2_ARCHITECTURE_I386)
+			return header;
+	}
+
+	return NULL;
+}
+
+static int parse_mb2header(const struct multiboot2_header *header, struct container *ctr)
+{
+	struct multiboot2_header_tag *tag;
+
+	for (tag = (struct multiboot2_header_tag *)(header + 1);
+		tag->type != MULTIBOOT2_TAG_TYPE_END;
+		tag = (struct multiboot2_header_tag *)((uint32_t *)tag + ALIGN_UP(tag->size, MULTIBOOT2_TAG_ALIGN) / 4))
+	{
+		switch (tag->type) {
+			case MULTIBOOT2_HEADER_TAG_INFORMATION_REQUEST:
+				/* Ignored. Currently we didn't support all categories of requested information,
+				 * only the part that ACRN requests. So we don't parse the requests here. */
+				break;
+
+			case MULTIBOOT2_HEADER_TAG_ADDRESS:
+				ctr->laddr = (LADDR_INFO *)tag;
+				break;
+
+			case MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS:
+				ctr->hv_entry = ((struct multiboot2_header_tag_entry_address *)tag)->entry_addr;
+				break;
+
+			case MULTIBOOT2_HEADER_TAG_RELOCATABLE:
+				ctr->reloc = (RELOC_INFO *)tag;
+				break;
+
+			default:
+				Print(L"Unsupported multiboot2 tag type: %d\n", tag->type);
+				return -1;
+		}
+	}
+
+	if (ctr->laddr && ctr->hv_entry == 0x0)
+		return -1;
+
+	return 0;
 }
 
 /**
@@ -177,18 +267,49 @@ static EFI_STATUS container_load_boot_image(HV_LOADER hvld)
 	struct container *ctr = (struct container *)hvld;
 
 	LOADER_COMPRESSED_HEADER *lzh = NULL;
+	const void *mb_hdr;
 
 	/* hv_cmdline.txt: to be copied into memory by the fill_bootcmd_tag operation later */
 	lzh = ctr->lzh_ptr[LZH_BOOT_CMD];
 	ctr->boot_cmdsize = lzh->Size + StrnLen(ctr->options, ctr->options_size);
 
+	/* Currently mb2 only */
+	mb_hdr = find_mb2header((const UINT8 *)lzh->Data, MULTIBOOT2_SEARCH);
+	if (mb_hdr) {
+		if (parse_mb2header((struct multiboot2_header *)mb_hdr, ctr)) {
+			Print(L"Illegal multiboot2 header, aborting\n");
+			return EFI_INVALID_PARAMETER;
+		}
+		ctr->mb_version = 2;
+	} else {
+		/* try find mb1 header */
+		mb_hdr = (struct multiboot_header *)find_mb1header((const UINT8 *)lzh->Data, MULTIBOOT_SEARCH);
+		if (!mb_hdr) {
+			Print(L"Image is not multiboot compatible\n");
+			return EFI_INVALID_PARAMETER;
+		}
+		ctr->mb_version = 1;
+		if (parse_mb1header((struct multiboot_header *)mb_hdr, ctr)) {
+			Print(L"Illegal multiboot header, aborting\n");
+			return EFI_INVALID_PARAMETER;
+		}
+	}
+
 	/* acrn.32.out */
+	/* TODO: Add support for loading flat binary (i.e., acrn.bin) */
 	lzh = ctr->lzh_ptr[LZH_BOOT_IMG];
-	err = load_acrn_elf((const UINT8 *)lzh->Data, &ctr->hv_hpa);
+	err = load_acrn_elf((const UINT8 *)lzh->Data, &ctr->hv_hpa,
+		ctr->laddr->load_addr,
+		ctr->laddr->load_end_addr - ctr->laddr->load_addr,
+		ctr->reloc);
 	if (err != EFI_SUCCESS) {
 		Print(L"Failed to load ACRN HV ELF Image%r\n", err);
 		goto out;
 	}
+
+	/* Fix up entry address */
+	if (ctr->reloc)
+		ctr->hv_entry += ctr->hv_hpa - ctr->laddr->load_addr;
 out:
 	return err;
 }
@@ -225,8 +346,14 @@ out:
 	ctr->mod_count = (ctr->lzh_count - 3) / 2;
 
 	/* allocate single memory region to store all binary files to avoid mmap fragmentation */
-	err = emalloc_reserved_aligned(&(ctr->mod_hpa), ctr->total_modsize,
-							EFI_PAGE_SIZE, 256U * MEM_ADDR_1MB, MEM_ADDR_4GB);
+	if (ctr->reloc) {
+		err = emalloc_reserved_aligned(&(ctr->mod_hpa), ctr->total_modsize,
+								EFI_PAGE_SIZE, ctr->reloc->min_addr, ctr->reloc->max_addr);
+	} else {
+		/* We put modules after hv */
+		UINTN hv_ram_size = ctr->laddr->load_end_addr - ctr->laddr->load_addr;
+		err = emalloc_fixed_addr(&(ctr->mod_hpa), hv_ram_size, ctr->hv_hpa + ALIGN_UP(hv_ram_size, EFI_PAGE_SIZE));
+	}
 	if (err != EFI_SUCCESS) {
 		Print(L"Failed to allocate memory for modules %r\n", err);
 		goto out;
@@ -313,6 +440,48 @@ static EFI_PHYSICAL_ADDRESS container_get_hv_hpa(HV_LOADER hvld)
 static EFI_PHYSICAL_ADDRESS container_get_mod_hpa(HV_LOADER hvld)
 {
 	return ((struct container *)hvld)->mod_hpa;
+}
+
+/**
+ * @brief Get the supported multiboot version of ACRN hypervisor image
+ *
+ * @param[in] hvld Loader handle
+ *
+ * @return supported multiboot version. Can be either 1 or 2.
+ */
+static int container_get_multiboot_version(HV_LOADER hvld)
+{
+	return ((struct container *)hvld)->mb_version;
+}
+
+/**
+ * @brief Get the entry point of ACRN hypervisor
+ *
+ * @param[in] hvld Loader handle
+ *
+ * @return the entry point of hypervisor
+ */
+static EFI_PHYSICAL_ADDRESS container_get_hv_entry(HV_LOADER hvld)
+{
+	return ((struct container *)hvld)->hv_entry;
+}
+
+/**
+ * @brief Get the total memory size of hv image
+ *
+ * @param[in] hvld Loader handle
+ *
+ * @return the memory size of hv image
+ */
+static UINTN container_get_hv_ram_size(HV_LOADER hvld)
+{
+	struct container *ctr = (struct container *)hvld;
+	if (ctr->laddr) {
+		return ctr->laddr->load_end_addr - ctr->laddr->load_addr;
+	}
+
+	/* TODO: calculate size from ACRN ELF header */
+	return 0;
 }
 
 /**
@@ -409,6 +578,9 @@ static struct hv_loader container_ops = {
 	.get_mod_count = container_get_mod_count,
 	.get_hv_hpa = container_get_hv_hpa,
 	.get_mod_hpa = container_get_mod_hpa,
+	.get_hv_entry = container_get_hv_entry,
+	.get_multiboot_version = container_get_multiboot_version,
+	.get_hv_ram_size = container_get_hv_ram_size,
 	.fill_bootcmd_tag = container_fill_bootcmd_tag,
 	.fill_module_tag = container_fill_module_tag,
 	.deinit = container_deinit,
