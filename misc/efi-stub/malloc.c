@@ -57,10 +57,9 @@ emalloc_reserved_aligned(EFI_PHYSICAL_ADDRESS *addr, UINTN size, UINTN align,
 	desc_sz = mmap_info.desc_size;
 	mbuf = mmap_info.mmap;
 
-	/* In most time, Memory map reported by BIOS is an ordering list from low to hight.
-	 * Scan it from high to low, so that allocate memory as high as possible
-	 */
-	for (desc_addr = (UINTN)mbuf + msize - desc_sz; desc_addr >= (UINTN)mbuf; desc_addr -= desc_sz) {
+	/* ACRN requests for lowest possible address that's greater than minaddr */
+	/* TODO: in the future we may want to support both preferences */
+	for (desc_addr = (UINTN)mbuf; desc_addr <= (UINTN)mbuf + msize - desc_sz; desc_addr += desc_sz) {
 		EFI_MEMORY_DESCRIPTOR *desc;
 		EFI_PHYSICAL_ADDRESS start, end;
 
@@ -103,7 +102,7 @@ emalloc_reserved_aligned(EFI_PHYSICAL_ADDRESS *addr, UINTN size, UINTN align,
 			}
 		}
 	}
-	if (desc_addr < (UINTN)mbuf) {
+	if (desc_addr > (UINTN)mbuf + msize - desc_sz) {
 		err = EFI_OUT_OF_RESOURCES;
 	}
 
