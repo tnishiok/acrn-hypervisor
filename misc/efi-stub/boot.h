@@ -207,6 +207,8 @@ struct hv_loader {
 	void (*deinit)(IN HV_LOADER hvld);
 };
 
+EFI_STATUS get_efi_memmap(struct efi_memmap_info *mmap_info, int size_only);
+
 static inline uint64_t
 msr_read(uint32_t reg_num)
 {

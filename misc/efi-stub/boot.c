@@ -45,7 +45,7 @@ EFI_BOOT_SERVICES *boot;
 EFI_RUNTIME_SERVICES *runtime;
 HV_LOADER hvld;
 
-static EFI_STATUS
+EFI_STATUS
 get_efi_memmap(struct efi_memmap_info *mi, int size_only)
 {
 	UINTN map_size, map_key;
